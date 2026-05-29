@@ -1,0 +1,33 @@
+{
+  "name": "api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file ../../.env src/index.ts",
+    "build": "npm --workspace @blood-donation/shared run build && tsc --project tsconfig.build.json",
+    "start": "node dist/index.js",
+    "migrate": "tsx --env-file ../../.env src/db/run-migrate.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@blood-donation/shared": "*",
+    "@fastify/cors": "^10.0.0",
+    "@fastify/sensible": "^6.0.0",
+    "bullmq": "^5.0.0",
+    "expo-server-sdk": "^3.10.0",
+    "fastify": "^5.0.0",
+    "firebase-admin": "^13.10.0",
+    "ioredis": "^5.3.0",
+    "postgres": "^3.4.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

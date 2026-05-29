@@ -1,0 +1,24 @@
+# Render Blueprint — API only
+# Database: Supabase (DATABASE_URL)
+# Redis: Upstash (REDIS_URL) — see docs/UPSTASH.md
+
+services:
+  - type: web
+    name: reddar-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: RUN_MIGRATIONS_ON_START
+        value: "true"
+      # Set in Render Dashboard:
+      # - DATABASE_URL          (Supabase)
+      # - REDIS_URL             (Upstash rediss:// — see docs/UPSTASH.md)
+      # - ENCRYPTION_KEY
+      # - FIREBASE_SERVICE_ACCOUNT_JSON
+      # - CORS_ORIGINS (optional)
+      # - EXPO_ACCESS_TOKEN (optional)
