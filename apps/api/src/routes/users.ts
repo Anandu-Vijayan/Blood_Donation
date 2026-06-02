@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { requireAuth } from '../plugins/auth.js';
 import { sql } from '../db/client.js';
 import { decrypt } from '../lib/crypto.js';
+import { deleteUserAccount } from '../services/deleteUser.js';
 
 const roleSchema = z.object({
   is_donor: z.boolean(),
@@ -33,6 +34,12 @@ export async function userRoutes(app: FastifyInstance) {
     `;
     if (!user) return reply.notFound('User not found');
     return reply.send(user);
+  });
+
+  app.delete('/me', { preHandler: requireAuth }, async (request, reply) => {
+    const deleted = await deleteUserAccount(request.userId!);
+    if (!deleted) return reply.notFound('User not found');
+    return reply.code(204).send();
   });
 
   app.get('/me/requests', { preHandler: requireAuth }, async (request, reply) => {
