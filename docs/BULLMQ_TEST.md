@@ -68,6 +68,7 @@ curl -s -X POST "$API/requests" \
   -H "Authorization: Bearer $RECIPIENT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
+    "full_name": "Test Recipient",
     "blood_group": "O+",
     "units": 1,
     "hospital_name": "Test Hospital",

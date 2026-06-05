@@ -15,6 +15,13 @@ export async function migrate() {
   `;
 
   await sql`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS full_name TEXT,
+    ADD COLUMN IF NOT EXISTS phone_encrypted TEXT,
+    ADD COLUMN IF NOT EXISTS phone_iv TEXT
+  `;
+
+  await sql`
     CREATE TABLE IF NOT EXISTS donors (
       id              SERIAL PRIMARY KEY,
       firebase_uid    TEXT UNIQUE NOT NULL REFERENCES users(firebase_uid),

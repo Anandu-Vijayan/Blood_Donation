@@ -2,7 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../plugins/auth.js';
 import { sql } from '../db/client.js';
-import { decrypt } from '../lib/crypto.js';
+import { encrypt, decrypt } from '../lib/crypto.js';
 import { scheduleNotificationTiers, cancelNotificationTiers } from '../workers/notification.worker.js';
 import { BLOOD_GROUPS, COOLDOWN_DAYS, MATCH_CANCEL_WINDOW_MINUTES } from '../lib/constants.js';
 
@@ -12,7 +12,11 @@ export async function requestRoutes(app: FastifyInstance) {
   // 5.1 POST /requests
   app.post('/', { preHandler: requireAuth }, async (request, reply) => {
     const firebaseUid = request.userId!;
+    if (!request.phoneNumber) {
+      return reply.badRequest('Phone number is missing from auth token');
+    }
     const body = z.object({
+      full_name: z.string().min(1),
       blood_group: bloodGroupEnum,
       units: z.number().int().positive(),
       hospital_name: z.string().min(1),
@@ -23,10 +27,17 @@ export async function requestRoutes(app: FastifyInstance) {
       requirement_date: z.string().optional().nullable(),
     }).parse(request.body);
 
+    const { encrypted, iv } = encrypt(request.phoneNumber);
+
     // Ensure user row exists (FK target for blood_requests)
     await sql`
-      INSERT INTO users (firebase_uid, is_recipient) VALUES (${firebaseUid}, TRUE)
-      ON CONFLICT (firebase_uid) DO UPDATE SET is_recipient = TRUE
+      INSERT INTO users (firebase_uid, is_recipient, full_name, phone_encrypted, phone_iv)
+      VALUES (${firebaseUid}, TRUE, ${body.full_name}, ${encrypted}, ${iv})
+      ON CONFLICT (firebase_uid) DO UPDATE
+        SET is_recipient = TRUE,
+            full_name = EXCLUDED.full_name,
+            phone_encrypted = EXCLUDED.phone_encrypted,
+            phone_iv = EXCLUDED.phone_iv
     `;
 
     const [req] = await sql`
@@ -134,7 +145,7 @@ export async function requestRoutes(app: FastifyInstance) {
 
     // Re-validate donor eligibility at acceptance time
     const [donor] = await sql`
-      SELECT id, full_name, phone_encrypted, phone_iv, blood_group
+      SELECT id, blood_group
       FROM donors
       WHERE firebase_uid = ${firebaseUid}
         AND availability = TRUE
@@ -152,28 +163,37 @@ export async function requestRoutes(app: FastifyInstance) {
     if (req.status !== 'open') return reply.conflict('This request has already been matched');
     if (req.blood_group !== donor.blood_group) return reply.badRequest('Blood group mismatch');
 
-    // Get recipient contact (stored as Clerk user — we reveal their name stored in users table)
-    // For now we surface hospital details as the recipient's coordination point
+    const [recipient] = await sql`
+      SELECT
+        COALESCE(u.full_name, d.full_name) AS name,
+        COALESCE(u.phone_encrypted, d.phone_encrypted) AS phone_encrypted,
+        COALESCE(u.phone_iv, d.phone_iv) AS phone_iv
+      FROM users u
+      LEFT JOIN donors d ON d.firebase_uid = u.firebase_uid
+      WHERE u.firebase_uid = ${req.recipient_firebase_uid}
+    `;
+    if (!recipient?.phone_encrypted || !recipient?.phone_iv) {
+      return reply.unprocessableEntity('Recipient contact unavailable');
+    }
+
     await sql`UPDATE blood_requests SET status = 'matched' WHERE id = ${id}`;
     await sql`
       INSERT INTO handshakes (request_id, donor_id) VALUES (${id}, ${donor.id})
     `;
     await cancelNotificationTiers(id);
 
-    const donorPhone = decrypt(donor.phone_encrypted, donor.phone_iv);
+    const recipientPhone = decrypt(recipient.phone_encrypted as string, recipient.phone_iv as string);
 
     return reply.send({
       matched: true,
-      donor: {
-        name: donor.full_name,
-        phone: donorPhone,
+      recipient: {
+        name: recipient.name,
+        phone: recipientPhone,
       },
       request: {
         hospital_name: req.hospital_name,
         latitude: req.lat,
         longitude: req.lng,
-        units: req.units,
-        blood_group: req.blood_group,
       },
     });
   });
