@@ -4,6 +4,7 @@ import { requireAuth } from '../plugins/auth.js';
 import { sql } from '../db/client.js';
 import { encrypt, decrypt } from '../lib/crypto.js';
 import { scheduleNotificationTiers, cancelNotificationTiers } from '../workers/notification.worker.js';
+import { recordDonationForRequest } from '../services/recordDonation.js';
 import { BLOOD_GROUPS, COOLDOWN_DAYS, MATCH_CANCEL_WINDOW_MINUTES } from '../lib/constants.js';
 
 const bloodGroupEnum = z.enum(BLOOD_GROUPS as [string, ...string[]]);
@@ -127,12 +128,19 @@ export async function requestRoutes(app: FastifyInstance) {
     if (!req) return reply.notFound('Request not found');
     if (req.recipient_firebase_uid !== firebaseUid) return reply.forbidden('Not your request');
 
-    await sql`UPDATE blood_requests SET status = ${body.status} WHERE id = ${id}`;
+    if (body.status === 'fulfilled') {
+      await sql.begin(async (tx) => {
+        await recordDonationForRequest(id, tx);
+        await tx`UPDATE blood_requests SET status = 'fulfilled' WHERE id = ${id}`;
+      });
+    } else {
+      await sql`UPDATE blood_requests SET status = ${body.status} WHERE id = ${id}`;
 
-    // If unfulfilled and was matched, reopen and resume notification pipeline
-    if (body.status === 'unfulfilled' && req.status === 'matched') {
-      await sql`UPDATE blood_requests SET status = 'open' WHERE id = ${id}`;
-      await scheduleNotificationTiers(id);
+      // If unfulfilled and was matched, reopen and resume notification pipeline
+      if (body.status === 'unfulfilled' && req.status === 'matched') {
+        await sql`UPDATE blood_requests SET status = 'open' WHERE id = ${id}`;
+        await scheduleNotificationTiers(id);
+      }
     }
 
     return reply.send({ ok: true });
@@ -238,16 +246,10 @@ export async function requestRoutes(app: FastifyInstance) {
     `;
     if (!handshake) return reply.forbidden('No active match for this request');
 
-    await sql`
-      UPDATE donors
-      SET last_donated_at = NOW(), donation_count = donation_count + 1
-      WHERE id = ${donor.id}
-    `;
-    await sql`
-      INSERT INTO donations (donor_id, request_id, blood_group)
-      VALUES (${donor.id}, ${id}, ${donor.blood_group})
-    `;
-    await sql`UPDATE blood_requests SET status = 'fulfilled' WHERE id = ${id}`;
+    await sql.begin(async (tx) => {
+      await recordDonationForRequest(id, tx);
+      await tx`UPDATE blood_requests SET status = 'fulfilled' WHERE id = ${id}`;
+    });
 
     return reply.send({ ok: true, message: 'Donation recorded. You are in cooldown for 90 days.' });
   });
