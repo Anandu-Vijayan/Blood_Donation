@@ -6,6 +6,15 @@ export type UserRole = 'donor' | 'recipient';
 
 export type RequestStatus = 'open' | 'matched' | 'fulfilled' | 'unfulfilled';
 
+export interface PlatformStats {
+  total_requests: number;
+  total_open: number;
+  total_in_process: number;
+  total_fulfilled: number;
+  total_donors: number;
+  total_hospitals: number;
+}
+
 export type UrgencyLevel = 'critical' | 'urgent' | 'normal';
 
 export type RequirementType = 'specific' | 'standby' | 'replacement';

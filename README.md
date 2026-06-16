@@ -94,6 +94,8 @@ Quick steps:
 | Prefix | Auth | Description |
 |--------|------|-------------|
 | `GET /health` | No | Postgres + Redis health |
+| `GET /stats` | No | Platform statistics |
+| `GET /dashboard/summary` | No | Same as `/stats` (alias) |
 | `/users` | Firebase JWT | User profile & roles |
 | `/donors` | Firebase JWT | Donor registration & profile |
 | `/requests` | Firebase JWT | Blood requests & matching |
