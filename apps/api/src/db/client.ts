@@ -11,4 +11,10 @@ export const sql = postgres(connectionString, {
   idle_timeout: 30,
   connect_timeout: 10,
   ssl: useSsl ? 'require' : undefined,
+  prepare: connectionString.includes('pgbouncer=true') ? false : undefined,
+  onnotice: (notice) => {
+    if (notice.severity !== 'NOTICE') {
+      console.warn(notice);
+    }
+  },
 });

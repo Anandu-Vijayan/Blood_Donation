@@ -1,0 +1,12 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+allowBuilds:
+  "@firebase/util": true
+  esbuild: true
+  msgpackr-extract: true
+  protobufjs: true
+
+overrides:
+  ioredis: "5.11.1"
