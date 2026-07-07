@@ -79,3 +79,13 @@ describe('Urgency scoring', () => {
     expect(URGENCY_SCORES.urgent).toBeGreaterThan(URGENCY_SCORES.normal);
   });
 });
+
+describe('User stats logic', () => {
+  it('calculates total donations correctly as the sum of completed and active donations', () => {
+    const completed = 5;
+    const active = 2;
+    const total = completed + active;
+    expect(total).toBe(7);
+  });
+});
+

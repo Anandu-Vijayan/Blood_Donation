@@ -139,10 +139,17 @@ export async function migrate() {
 
   // Seed hospitals from shared package (idempotent)
   const allHospitals = [...KERALA_HOSPITALS, ...MAJOR_INDIAN_HOSPITALS];
-  for (const h of allHospitals) {
+  if (allHospitals.length > 0) {
+    const rows = allHospitals.map(h => ({
+      name: h.name,
+      city: h.city,
+      district: h.district,
+      latitude: h.latitude,
+      longitude: h.longitude,
+      is_custom: false
+    }));
     await sql`
-      INSERT INTO hospitals (name, city, district, latitude, longitude, is_custom)
-      VALUES (${h.name}, ${h.city}, ${h.district}, ${h.latitude}, ${h.longitude}, FALSE)
+      INSERT INTO hospitals ${sql(rows, 'name', 'city', 'district', 'latitude', 'longitude', 'is_custom')}
       ON CONFLICT (LOWER(name), LOWER(city)) DO NOTHING
     `;
   }

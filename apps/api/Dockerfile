@@ -1,21 +1,23 @@
 FROM node:22-alpine AS builder
+RUN corepack enable
 WORKDIR /app
-COPY package.json package-lock.json .npmrc ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY apps/api/package.json ./apps/api/
 COPY packages/shared/package.json ./packages/shared/
-RUN npm install --workspace apps/api --workspace packages/shared
+RUN pnpm install --frozen-lockfile
 COPY packages/shared ./packages/shared
 COPY apps/api ./apps/api
-RUN npm --workspace packages/shared run build
-RUN npm --workspace apps/api run build
+RUN pnpm --filter @blood-donation/shared build
+RUN pnpm --filter api build
 
 FROM node:22-alpine AS runner
+RUN corepack enable
 WORKDIR /app
 ENV NODE_ENV=production
-COPY package.json package-lock.json .npmrc ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY apps/api/package.json ./apps/api/
 COPY packages/shared/package.json ./packages/shared/
-RUN npm install --workspace apps/api --workspace packages/shared --omit=dev
+RUN pnpm install --prod --frozen-lockfile
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
 WORKDIR /app/apps/api

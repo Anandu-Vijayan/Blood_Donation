@@ -89,4 +89,51 @@ export async function userRoutes(app: FastifyInstance) {
 
     return reply.send({ requests });
   });
+
+  // GET /users/me/stats
+  app.get('/me/stats', { preHandler: requireAuth }, async (request, reply) => {
+    const firebaseUid = request.userId!;
+
+    // Find donor profile associated with this user
+    const [donor] = await sql`
+      SELECT id FROM donors WHERE firebase_uid = ${firebaseUid}
+    `;
+
+    if (!donor) {
+      return reply.send({
+        total_donations: 0,
+        active_donations: 0,
+        completed_donations: 0,
+        totalDonations: 0,
+        activeDonations: 0,
+        completedDonations: 0,
+      });
+    }
+
+    const [stats] = await sql`
+      SELECT
+        (SELECT COUNT(*)::int FROM donations WHERE donor_id = ${donor.id}) AS completed_donations,
+        (
+          SELECT COUNT(*)::int
+          FROM handshakes h
+          JOIN blood_requests br ON br.id = h.request_id
+          WHERE h.donor_id = ${donor.id}
+            AND h.cancelled_at IS NULL
+            AND br.status = 'matched'
+        ) AS active_donations
+    `;
+
+    const completed = stats.completed_donations || 0;
+    const active = stats.active_donations || 0;
+    const total = completed + active;
+
+    return reply.send({
+      total_donations: total,
+      active_donations: active,
+      completed_donations: completed,
+      totalDonations: total,
+      activeDonations: active,
+      completedDonations: completed,
+    });
+  });
 }
