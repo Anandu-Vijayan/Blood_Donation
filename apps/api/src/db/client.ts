@@ -1,6 +1,6 @@
 import postgres from 'postgres';
 
-const connectionString = process.env.DATABASE_URL!;
+const connectionString = process.env.DATABASE_URL || '';
 const useSsl =
   process.env.DATABASE_SSL === 'true' ||
   connectionString.includes('supabase.com') ||

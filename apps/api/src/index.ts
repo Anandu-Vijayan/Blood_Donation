@@ -5,6 +5,7 @@ import { donorRoutes } from './routes/donors.js';
 import { requestRoutes } from './routes/requests.js';
 import { userRoutes } from './routes/users.js';
 import { hospitalRoutes } from './routes/hospitals.js';
+import { recipientRoutes } from './routes/recipient.js';
 import { statsRoutes } from './routes/stats.js';
 import { startNotificationWorker, stopNotificationWorker } from './workers/notification.worker.js';
 import { migrate } from './db/migrate.js';
@@ -30,6 +31,8 @@ await app.register(userRoutes, { prefix: '/users' });
 await app.register(donorRoutes, { prefix: '/donors' });
 await app.register(requestRoutes, { prefix: '/requests' });
 await app.register(hospitalRoutes, { prefix: '/hospitals' });
+await app.register(recipientRoutes, { prefix: '/recipient' });
+await app.register(recipientRoutes, { prefix: '/recipients' });
 await app.register(statsRoutes);
 
 app.get('/health', async (_request, reply) => {
