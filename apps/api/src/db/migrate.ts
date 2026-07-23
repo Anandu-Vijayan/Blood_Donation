@@ -18,7 +18,13 @@ export async function migrate() {
     ALTER TABLE users
     ADD COLUMN IF NOT EXISTS full_name TEXT,
     ADD COLUMN IF NOT EXISTS phone_encrypted TEXT,
-    ADD COLUMN IF NOT EXISTS phone_iv TEXT
+    ADD COLUMN IF NOT EXISTS phone_iv TEXT,
+    ADD COLUMN IF NOT EXISTS blood_group TEXT,
+    ADD COLUMN IF NOT EXISTS location GEOMETRY(Point, 4326)
+  `;
+
+  await sql`
+    CREATE INDEX IF NOT EXISTS users_location_idx ON users USING GIST (location)
   `;
 
   await sql`

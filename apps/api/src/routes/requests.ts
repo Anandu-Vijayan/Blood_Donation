@@ -74,6 +74,7 @@ export async function requestRoutes(app: FastifyInstance) {
     const rows = await sql`
       SELECT
         r.id, r.blood_group, r.units, r.hospital_name, r.urgency, r.requirement_type, r.requirement_date, r.created_at,
+        u.full_name AS recipient_name,
         CASE r.urgency
           WHEN 'critical' THEN 100
           WHEN 'urgent'   THEN 60
@@ -88,6 +89,7 @@ export async function requestRoutes(app: FastifyInstance) {
         ) AS distance_km
       FROM blood_requests r
       JOIN donors d ON d.firebase_uid = ${firebaseUid}
+      LEFT JOIN users u ON u.firebase_uid = r.recipient_firebase_uid
       WHERE r.status = 'open'
         AND r.blood_group = d.blood_group
         AND r.recipient_firebase_uid != ${firebaseUid}
@@ -101,19 +103,48 @@ export async function requestRoutes(app: FastifyInstance) {
         )
       ORDER BY urgency_score DESC, distance_km ASC, r.created_at ASC
     `;
-    return reply.send(rows);
+
+    const formatted = rows.map((r) => ({
+      ...r,
+      recipient_name: r.recipient_name || 'Recipient',
+      recipientName: r.recipient_name || 'Recipient',
+      distance_km: r.distance_km != null ? Number(r.distance_km) : null,
+      distanceKm: r.distance_km != null ? Number(r.distance_km) : null,
+    }));
+
+    return reply.send(formatted);
   });
 
   // 5.3 GET /requests/:id
   app.get('/:id', { preHandler: requireAuth }, async (request, reply) => {
+    const firebaseUid = request.userId!;
     const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
     const [req] = await sql`
       SELECT
-        id, blood_group, units, hospital_name, urgency, requirement_type, requirement_date, status, created_at
-      FROM blood_requests WHERE id = ${id}
+        r.id, r.blood_group, r.units, r.hospital_name, r.urgency, r.requirement_type, r.requirement_date, r.status, r.created_at,
+        u.full_name AS recipient_name,
+        ROUND(
+          (ST_Distance(
+            COALESCE(d.location, caller_u.location)::geography,
+            r.hospital_location::geography
+          ) / 1000)::numeric,
+          1
+        ) AS distance_km
+      FROM blood_requests r
+      LEFT JOIN users u ON u.firebase_uid = r.recipient_firebase_uid
+      LEFT JOIN donors d ON d.firebase_uid = ${firebaseUid}
+      LEFT JOIN users caller_u ON caller_u.firebase_uid = ${firebaseUid}
+      WHERE r.id = ${id}
     `;
     if (!req) return reply.notFound('Request not found');
-    return reply.send(req);
+
+    return reply.send({
+      ...req,
+      recipient_name: req.recipient_name || 'Recipient',
+      recipientName: req.recipient_name || 'Recipient',
+      distance_km: req.distance_km != null ? Number(req.distance_km) : null,
+      distanceKm: req.distance_km != null ? Number(req.distance_km) : null,
+    });
   });
 
   // 5.4 PATCH /requests/:id/status — recipient marks fulfilled/unfulfilled

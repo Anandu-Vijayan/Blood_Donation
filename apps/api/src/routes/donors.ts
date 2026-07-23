@@ -166,7 +166,7 @@ export async function donorRoutes(app: FastifyInstance) {
   app.get('/me/matches', { preHandler: requireAuth }, async (request, reply) => {
     const firebaseUid = request.userId!;
     const [donor] = await sql`
-      SELECT id, full_name, phone_encrypted, phone_iv FROM donors WHERE firebase_uid = ${firebaseUid}
+      SELECT id, full_name, phone_encrypted, phone_iv, location FROM donors WHERE firebase_uid = ${firebaseUid}
     `;
     if (!donor) return reply.notFound('Donor profile not found');
 
@@ -179,9 +179,19 @@ export async function donorRoutes(app: FastifyInstance) {
         br.urgency,
         br.status,
         br.created_at,
-        h.matched_at
+        h.matched_at,
+        u.full_name AS recipient_name,
+        ROUND(
+          (ST_Distance(
+            d.location::geography,
+            br.hospital_location::geography
+          ) / 1000)::numeric,
+          1
+        ) AS distance_km
       FROM handshakes h
       JOIN blood_requests br ON br.id = h.request_id
+      JOIN donors d ON d.id = h.donor_id
+      LEFT JOIN users u ON u.firebase_uid = br.recipient_firebase_uid
       WHERE h.donor_id = ${donor.id} AND h.cancelled_at IS NULL AND br.status = 'matched'
       ORDER BY h.matched_at DESC
     `;
@@ -199,6 +209,10 @@ export async function donorRoutes(app: FastifyInstance) {
       matched_at: m.matched_at,
       donorName: donor.full_name,
       donorPhone: donorPhone,
+      recipientName: m.recipient_name || 'Recipient',
+      recipient_name: m.recipient_name || 'Recipient',
+      distance_km: m.distance_km != null ? Number(m.distance_km) : null,
+      distanceKm: m.distance_km != null ? Number(m.distance_km) : null,
     }));
 
     return reply.send(formattedMatches);
