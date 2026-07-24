@@ -87,6 +87,19 @@ export async function deleteUserAccount(firebaseUid: string): Promise<boolean> {
     await tx`DELETE FROM users WHERE firebase_uid = ${firebaseUid}`;
   });
 
-  await auth.deleteUser(firebaseUid);
+  try {
+    await auth.deleteUser(firebaseUid);
+  } catch (err: unknown) {
+    const errorObj = err as { code?: string; message?: string };
+    if (errorObj?.code === 'auth/user-not-found') {
+      // User is already deleted from Firebase Auth
+    } else {
+      console.error(
+        `[deleteUserAccount] Warning: Failed to delete user ${firebaseUid} from Firebase Auth:`,
+        errorObj?.message || err,
+      );
+    }
+  }
+
   return true;
 }
