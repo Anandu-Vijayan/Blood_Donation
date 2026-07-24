@@ -53,6 +53,13 @@ export async function userRoutes(app: FastifyInstance) {
         br.urgency,
         br.status,
         br.created_at,
+        (
+          SELECT COUNT(*)::int
+          FROM donors d2
+          WHERE d2.availability = TRUE
+            AND d2.blood_group = br.blood_group
+            AND (br.hospital_location IS NULL OR d2.location IS NULL OR ST_DWithin(d2.location::geography, br.hospital_location::geography, 50000))
+        ) AS nearby_donors_count,
         d.full_name        AS donor_name,
         d.phone_encrypted  AS donor_phone_encrypted,
         d.phone_iv         AS donor_phone_iv,
@@ -83,6 +90,8 @@ export async function userRoutes(app: FastifyInstance) {
         urgency: r.urgency,
         status: r.status,
         created_at: r.created_at,
+        nearby_donors_count: Number(r.nearby_donors_count || 0),
+        nearbyDonorsCount: Number(r.nearby_donors_count || 0),
         matched_donor,
       };
     });

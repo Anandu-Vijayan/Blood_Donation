@@ -57,13 +57,14 @@ describe('Recipient stats response structure', () => {
 });
 
 describe('Match and Request details response format', () => {
-  it('includes recipient_name and distance_km in formatted request item', () => {
+  it('includes recipient_name, distance_km, and nearby_donors_count in formatted request item', () => {
     const rawRow = {
       id: 1,
       blood_group: 'A+',
       hospital_name: 'KIMS',
       recipient_name: 'Alice',
       distance_km: '4.2',
+      nearby_donors_count: 5,
     };
 
     const formatted = {
@@ -72,12 +73,24 @@ describe('Match and Request details response format', () => {
       recipientName: rawRow.recipient_name || 'Recipient',
       distance_km: rawRow.distance_km != null ? Number(rawRow.distance_km) : null,
       distanceKm: rawRow.distance_km != null ? Number(rawRow.distance_km) : null,
+      nearby_donors_count: Number(rawRow.nearby_donors_count || 0),
+      nearbyDonorsCount: Number(rawRow.nearby_donors_count || 0),
     };
 
     expect(formatted.recipientName).toBe('Alice');
     expect(formatted.recipient_name).toBe('Alice');
     expect(formatted.distance_km).toBe(4.2);
     expect(formatted.distanceKm).toBe(4.2);
+    expect(formatted.nearby_donors_count).toBe(5);
+    expect(formatted.nearbyDonorsCount).toBe(5);
+  });
+
+  it('validates request status schema accepting open, fulfilled, and unfulfilled', () => {
+    const statusSchema = z.object({ status: z.enum(['fulfilled', 'unfulfilled', 'open']) });
+    expect(statusSchema.parse({ status: 'open' }).status).toBe('open');
+    expect(statusSchema.parse({ status: 'fulfilled' }).status).toBe('fulfilled');
+    expect(statusSchema.parse({ status: 'unfulfilled' }).status).toBe('unfulfilled');
+    expect(() => statusSchema.parse({ status: 'invalid' })).toThrow();
   });
 });
 

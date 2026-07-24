@@ -56,8 +56,21 @@ export async function requestRoutes(app: FastifyInstance) {
       RETURNING id, blood_group, units, hospital_name, urgency, requirement_type, requirement_date, status, created_at
     `;
 
+    const [donorCountRow] = await sql`
+      SELECT COUNT(*)::int AS count
+      FROM donors d
+      WHERE d.availability = TRUE
+        AND d.blood_group = ${body.blood_group}
+        AND (d.location IS NULL OR ST_DWithin(d.location::geography, ST_SetSRID(ST_MakePoint(${body.longitude}, ${body.latitude}), 4326)::geography, 50000))
+    `;
+    const nearbyDonorsCount = donorCountRow?.count || 0;
+
     await scheduleNotificationTiers(req.id);
-    return reply.code(201).send(req);
+    return reply.code(201).send({
+      ...req,
+      nearby_donors_count: nearbyDonorsCount,
+      nearbyDonorsCount,
+    });
   });
 
   // 5.2 GET /requests/open — urgency-sorted feed for donor's blood group, filtered by proximity to hospital.
@@ -86,7 +99,14 @@ export async function requestRoutes(app: FastifyInstance) {
             r.hospital_location::geography
           ) / 1000)::numeric,
           1
-        ) AS distance_km
+        ) AS distance_km,
+        (
+          SELECT COUNT(*)::int
+          FROM donors d2
+          WHERE d2.availability = TRUE
+            AND d2.blood_group = r.blood_group
+            AND (r.hospital_location IS NULL OR d2.location IS NULL OR ST_DWithin(d2.location::geography, r.hospital_location::geography, 50000))
+        ) AS nearby_donors_count
       FROM blood_requests r
       JOIN donors d ON d.firebase_uid = ${firebaseUid}
       LEFT JOIN users u ON u.firebase_uid = r.recipient_firebase_uid
@@ -110,6 +130,8 @@ export async function requestRoutes(app: FastifyInstance) {
       recipientName: r.recipient_name || 'Recipient',
       distance_km: r.distance_km != null ? Number(r.distance_km) : null,
       distanceKm: r.distance_km != null ? Number(r.distance_km) : null,
+      nearby_donors_count: Number(r.nearby_donors_count || 0),
+      nearbyDonorsCount: Number(r.nearby_donors_count || 0),
     }));
 
     return reply.send(formatted);
@@ -129,7 +151,14 @@ export async function requestRoutes(app: FastifyInstance) {
             r.hospital_location::geography
           ) / 1000)::numeric,
           1
-        ) AS distance_km
+        ) AS distance_km,
+        (
+          SELECT COUNT(*)::int
+          FROM donors d2
+          WHERE d2.availability = TRUE
+            AND d2.blood_group = r.blood_group
+            AND (r.hospital_location IS NULL OR d2.location IS NULL OR ST_DWithin(d2.location::geography, r.hospital_location::geography, 50000))
+        ) AS nearby_donors_count
       FROM blood_requests r
       LEFT JOIN users u ON u.firebase_uid = r.recipient_firebase_uid
       LEFT JOIN donors d ON d.firebase_uid = ${firebaseUid}
@@ -144,14 +173,16 @@ export async function requestRoutes(app: FastifyInstance) {
       recipientName: req.recipient_name || 'Recipient',
       distance_km: req.distance_km != null ? Number(req.distance_km) : null,
       distanceKm: req.distance_km != null ? Number(req.distance_km) : null,
+      nearby_donors_count: Number(req.nearby_donors_count || 0),
+      nearbyDonorsCount: Number(req.nearby_donors_count || 0),
     });
   });
 
-  // 5.4 PATCH /requests/:id/status — recipient marks fulfilled/unfulfilled
+  // 5.4 PATCH /requests/:id/status — recipient marks fulfilled/unfulfilled/open
   app.patch('/:id/status', { preHandler: requireAuth }, async (request, reply) => {
     const firebaseUid = request.userId!;
     const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
-    const body = z.object({ status: z.enum(['fulfilled', 'unfulfilled']) }).parse(request.body);
+    const body = z.object({ status: z.enum(['fulfilled', 'unfulfilled', 'open']) }).parse(request.body);
 
     const [req] = await sql`
       SELECT id, status, recipient_firebase_uid, last_tier_radius_km FROM blood_requests WHERE id = ${id}
@@ -164,11 +195,16 @@ export async function requestRoutes(app: FastifyInstance) {
         await recordDonationForRequest(id, tx);
         await tx`UPDATE blood_requests SET status = 'fulfilled' WHERE id = ${id}`;
       });
+    } else if (body.status === 'open') {
+      await sql`UPDATE handshakes SET cancelled_at = NOW() WHERE request_id = ${id} AND cancelled_at IS NULL`;
+      await sql`UPDATE blood_requests SET status = 'open' WHERE id = ${id}`;
+      await scheduleNotificationTiers(id);
     } else {
       await sql`UPDATE blood_requests SET status = ${body.status} WHERE id = ${id}`;
 
       // If unfulfilled and was matched, reopen and resume notification pipeline
       if (body.status === 'unfulfilled' && req.status === 'matched') {
+        await sql`UPDATE handshakes SET cancelled_at = NOW() WHERE request_id = ${id} AND cancelled_at IS NULL`;
         await sql`UPDATE blood_requests SET status = 'open' WHERE id = ${id}`;
         await scheduleNotificationTiers(id);
       }
