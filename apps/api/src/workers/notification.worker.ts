@@ -1,7 +1,7 @@
 import { Worker, Queue, Job } from 'bullmq';
 import { Expo, ExpoPushMessage } from 'expo-server-sdk';
 import { redis } from '../lib/redis.js';
-import { sql } from '../db/client.js';
+import { prisma } from '../db/prisma.js';
 import { NOTIFICATION_TIERS, COOLDOWN_DAYS } from '../lib/constants.js';
 
 export const notificationQueue = new Queue('notifications', { connection: redis });
@@ -18,7 +18,11 @@ interface NotificationJobData {
 
 // Queries eligible donors within radius, sends push notifications, logs to notifications_log
 export async function dispatchNotificationTier(requestId: number, radiusKm: number, tier: number) {
-  const [request] = await sql`
+  // hospital_location is an Unsupported("geometry") column -- ST_X/ST_Y extraction
+  // stays raw SQL via $queryRaw, same as donors.ts's geometry writes.
+  const [request] = await prisma.$queryRaw<
+    { id: number; blood_group: string; hospital_name: string; lng: number; lat: number; urgency: string; status: string }[]
+  >`
     SELECT id, blood_group, hospital_name,
            ST_X(hospital_location::geometry) AS lng,
            ST_Y(hospital_location::geometry) AS lat,
@@ -31,13 +35,15 @@ export async function dispatchNotificationTier(requestId: number, radiusKm: numb
   const regionWide = radiusKm >= 9999;
 
   // Eligible donors: exact blood group, active, not in cooldown, not already notified, has push token
-  const donors = await sql`
+  const donors = await prisma.$queryRaw<
+    { id: number; push_token: string | null; full_name: string }[]
+  >`
     SELECT d.id, d.push_token, d.full_name
     FROM donors d
     WHERE d.blood_group = ${request.blood_group}
       AND d.availability = TRUE
       AND d.push_token IS NOT NULL
-      AND (d.last_donated_at IS NULL OR d.last_donated_at < NOW() - INTERVAL '${sql(String(COOLDOWN_DAYS))} days')
+      AND (d.last_donated_at IS NULL OR d.last_donated_at < NOW() - (${COOLDOWN_DAYS} * INTERVAL '1 day'))
       AND NOT EXISTS (
         SELECT 1 FROM notifications_log nl
         WHERE nl.donor_id = d.id AND nl.request_id = ${requestId}
@@ -59,9 +65,9 @@ export async function dispatchNotificationTier(requestId: number, radiusKm: numb
   if (donors.length === 0) return;
 
   const messages: ExpoPushMessage[] = donors
-    .filter((d) => Expo.isExpoPushToken(d.push_token))
+    .filter((d) => Expo.isExpoPushToken(d.push_token ?? ''))
     .map((d) => ({
-      to: d.push_token,
+      to: d.push_token!,
       title: `Blood needed: ${request.blood_group}`,
       body: `${request.hospital_name} needs ${request.blood_group} blood. Can you help?`,
       data: { requestId, type: 'blood_request' },
@@ -79,15 +85,17 @@ export async function dispatchNotificationTier(requestId: number, radiusKm: numb
 
   // Log all notified donors to prevent duplicate dispatch in later tiers
   if (donors.length > 0) {
-    await sql`
-      INSERT INTO notifications_log (request_id, donor_id, tier)
-      SELECT ${requestId}, unnest(${donors.map((d) => d.id)}::int[]), ${tier}
-      ON CONFLICT (request_id, donor_id) DO NOTHING
-    `;
+    await prisma.notifications_log.createMany({
+      data: donors.map((d) => ({ request_id: requestId, donor_id: d.id, tier })),
+      skipDuplicates: true,
+    });
   }
 
   // Update last dispatched tier radius on the request
-  await sql`UPDATE blood_requests SET last_tier_radius_km = ${radiusKm} WHERE id = ${requestId}`;
+  await prisma.blood_requests.update({
+    where: { id: requestId },
+    data: { last_tier_radius_km: radiusKm },
+  });
 }
 
 export function startNotificationWorker() {

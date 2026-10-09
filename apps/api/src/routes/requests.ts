@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../plugins/auth.js';
-import { sql } from '../db/client.js';
+import { prisma } from '../db/prisma.js';
 import { encrypt, decrypt } from '../lib/crypto.js';
 import { scheduleNotificationTiers, cancelNotificationTiers } from '../workers/notification.worker.js';
 import { recordDonationForRequest } from '../services/recordDonation.js';
@@ -31,17 +31,27 @@ export async function requestRoutes(app: FastifyInstance) {
     const { encrypted, iv } = encrypt(request.phoneNumber);
 
     // Ensure user row exists (FK target for blood_requests)
-    await sql`
-      INSERT INTO users (firebase_uid, is_recipient, full_name, phone_encrypted, phone_iv)
-      VALUES (${firebaseUid}, TRUE, ${body.full_name}, ${encrypted}, ${iv})
-      ON CONFLICT (firebase_uid) DO UPDATE
-        SET is_recipient = TRUE,
-            full_name = EXCLUDED.full_name,
-            phone_encrypted = EXCLUDED.phone_encrypted,
-            phone_iv = EXCLUDED.phone_iv
-    `;
+    await prisma.users.upsert({
+      where: { firebase_uid: firebaseUid },
+      create: { firebase_uid: firebaseUid, is_recipient: true, full_name: body.full_name, phone_encrypted: encrypted, phone_iv: iv },
+      update: { is_recipient: true, full_name: body.full_name, phone_encrypted: encrypted, phone_iv: iv },
+    });
 
-    const [req] = await sql`
+    // hospital_location is an Unsupported("geometry") column -- this insert
+    // stays raw SQL via $queryRaw, same as donors.ts's geometry writes.
+    const [req] = await prisma.$queryRaw<
+      {
+        id: number;
+        blood_group: string;
+        units: number;
+        hospital_name: string;
+        urgency: string;
+        requirement_type: string;
+        requirement_date: Date | null;
+        status: string;
+        created_at: Date;
+      }[]
+    >`
       INSERT INTO blood_requests (recipient_firebase_uid, blood_group, units, hospital_name, hospital_location, urgency, requirement_type, requirement_date)
       VALUES (
         ${firebaseUid},
@@ -56,7 +66,7 @@ export async function requestRoutes(app: FastifyInstance) {
       RETURNING id, blood_group, units, hospital_name, urgency, requirement_type, requirement_date, status, created_at
     `;
 
-    const [donorCountRow] = await sql`
+    const [donorCountRow] = await prisma.$queryRaw<{ count: number }[]>`
       SELECT COUNT(*)::int AS count
       FROM donors d
       WHERE d.availability = TRUE
@@ -78,13 +88,31 @@ export async function requestRoutes(app: FastifyInstance) {
   // Freshly-created requests (radius=0) are visible within 5km — the first tier — to avoid a gap before the worker fires.
   app.get('/open', { preHandler: requireAuth }, async (request, reply) => {
     const firebaseUid = request.userId!;
-    const [donor] = await sql`
-      SELECT blood_group, location FROM donors WHERE firebase_uid = ${firebaseUid}
+    // donors.location is an Unsupported("geometry") column -- stays raw SQL via $queryRaw.
+    const [donor] = await prisma.$queryRaw<
+      { blood_group: string; has_location: boolean }[]
+    >`
+      SELECT blood_group, (location IS NOT NULL) AS has_location FROM donors WHERE firebase_uid = ${firebaseUid}
     `;
     if (!donor) return reply.badRequest('Register as a donor first');
-    if (!donor.location) return reply.badRequest('Donor location missing — please re-register');
+    if (!donor.has_location) return reply.badRequest('Donor location missing — please re-register');
 
-    const rows = await sql`
+    const rows = await prisma.$queryRaw<
+      {
+        id: number;
+        blood_group: string;
+        units: number;
+        hospital_name: string;
+        urgency: string;
+        requirement_type: string;
+        requirement_date: Date | null;
+        created_at: Date;
+        recipient_name: string | null;
+        urgency_score: number;
+        distance_km: string | null;
+        nearby_donors_count: number;
+      }[]
+    >`
       SELECT
         r.id, r.blood_group, r.units, r.hospital_name, r.urgency, r.requirement_type, r.requirement_date, r.created_at,
         u.full_name AS recipient_name,
@@ -141,7 +169,24 @@ export async function requestRoutes(app: FastifyInstance) {
   app.get('/:id', { preHandler: requireAuth }, async (request, reply) => {
     const firebaseUid = request.userId!;
     const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
-    const [req] = await sql`
+    // hospital_location / donors.location / users.location are
+    // Unsupported("geometry") columns -- stays raw SQL via $queryRaw.
+    const [req] = await prisma.$queryRaw<
+      {
+        id: number;
+        blood_group: string;
+        units: number;
+        hospital_name: string;
+        urgency: string;
+        requirement_type: string;
+        requirement_date: Date | null;
+        status: string;
+        created_at: Date;
+        recipient_name: string | null;
+        distance_km: string | null;
+        nearby_donors_count: number;
+      }[]
+    >`
       SELECT
         r.id, r.blood_group, r.units, r.hospital_name, r.urgency, r.requirement_type, r.requirement_date, r.status, r.created_at,
         u.full_name AS recipient_name,
@@ -184,28 +229,35 @@ export async function requestRoutes(app: FastifyInstance) {
     const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
     const body = z.object({ status: z.enum(['fulfilled', 'unfulfilled', 'open']) }).parse(request.body);
 
-    const [req] = await sql`
-      SELECT id, status, recipient_firebase_uid, last_tier_radius_km FROM blood_requests WHERE id = ${id}
-    `;
+    const req = await prisma.blood_requests.findUnique({
+      where: { id },
+      select: { id: true, status: true, recipient_firebase_uid: true, last_tier_radius_km: true },
+    });
     if (!req) return reply.notFound('Request not found');
     if (req.recipient_firebase_uid !== firebaseUid) return reply.forbidden('Not your request');
 
     if (body.status === 'fulfilled') {
-      await sql.begin(async (tx) => {
+      await prisma.$transaction(async (tx) => {
         await recordDonationForRequest(id, tx);
-        await tx`UPDATE blood_requests SET status = 'fulfilled' WHERE id = ${id}`;
+        await tx.blood_requests.update({ where: { id }, data: { status: 'fulfilled' } });
       });
     } else if (body.status === 'open') {
-      await sql`UPDATE handshakes SET cancelled_at = NOW() WHERE request_id = ${id} AND cancelled_at IS NULL`;
-      await sql`UPDATE blood_requests SET status = 'open' WHERE id = ${id}`;
+      await prisma.handshakes.updateMany({
+        where: { request_id: id, cancelled_at: null },
+        data: { cancelled_at: new Date() },
+      });
+      await prisma.blood_requests.update({ where: { id }, data: { status: 'open' } });
       await scheduleNotificationTiers(id);
     } else {
-      await sql`UPDATE blood_requests SET status = ${body.status} WHERE id = ${id}`;
+      await prisma.blood_requests.update({ where: { id }, data: { status: body.status } });
 
       // If unfulfilled and was matched, reopen and resume notification pipeline
       if (body.status === 'unfulfilled' && req.status === 'matched') {
-        await sql`UPDATE handshakes SET cancelled_at = NOW() WHERE request_id = ${id} AND cancelled_at IS NULL`;
-        await sql`UPDATE blood_requests SET status = 'open' WHERE id = ${id}`;
+        await prisma.handshakes.updateMany({
+          where: { request_id: id, cancelled_at: null },
+          data: { cancelled_at: new Date() },
+        });
+        await prisma.blood_requests.update({ where: { id }, data: { status: 'open' } });
         await scheduleNotificationTiers(id);
       }
     }
@@ -219,16 +271,31 @@ export async function requestRoutes(app: FastifyInstance) {
     const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
 
     // Re-validate donor eligibility at acceptance time
-    const [donor] = await sql`
-      SELECT id, blood_group
-      FROM donors
-      WHERE firebase_uid = ${firebaseUid}
-        AND availability = TRUE
-        AND (last_donated_at IS NULL OR last_donated_at < NOW() - INTERVAL '${sql(String(COOLDOWN_DAYS))} days')
-    `;
+    const cooldownCutoff = new Date(Date.now() - COOLDOWN_DAYS * 24 * 60 * 60 * 1000);
+    const donor = await prisma.donors.findFirst({
+      where: {
+        firebase_uid: firebaseUid,
+        availability: true,
+        OR: [{ last_donated_at: null }, { last_donated_at: { lt: cooldownCutoff } }],
+      },
+      select: { id: true, blood_group: true },
+    });
     if (!donor) return reply.forbidden('You are not eligible to donate right now');
 
-    const [req] = await sql`
+    // hospital_location is an Unsupported("geometry") column -- ST_X/ST_Y
+    // extraction stays raw SQL via $queryRaw.
+    const [req] = await prisma.$queryRaw<
+      {
+        id: number;
+        status: string;
+        blood_group: string;
+        units: number;
+        hospital_name: string;
+        recipient_firebase_uid: string;
+        lng: number;
+        lat: number;
+      }[]
+    >`
       SELECT id, status, blood_group, units, hospital_name, recipient_firebase_uid,
              ST_X(hospital_location::geometry) AS lng,
              ST_Y(hospital_location::geometry) AS lat
@@ -238,31 +305,44 @@ export async function requestRoutes(app: FastifyInstance) {
     if (req.status !== 'open') return reply.conflict('This request has already been matched');
     if (req.blood_group !== donor.blood_group) return reply.badRequest('Blood group mismatch');
 
-    const [recipient] = await sql`
-      SELECT
-        COALESCE(u.full_name, d.full_name) AS name,
-        COALESCE(u.phone_encrypted, d.phone_encrypted) AS phone_encrypted,
-        COALESCE(u.phone_iv, d.phone_iv) AS phone_iv
-      FROM users u
-      LEFT JOIN donors d ON d.firebase_uid = u.firebase_uid
-      WHERE u.firebase_uid = ${req.recipient_firebase_uid}
-    `;
-    if (!recipient?.phone_encrypted || !recipient?.phone_iv) {
+    const recipientUser = await prisma.users.findUnique({
+      where: { firebase_uid: req.recipient_firebase_uid },
+      select: {
+        full_name: true,
+        phone_encrypted: true,
+        phone_iv: true,
+        donors: { select: { full_name: true, phone_encrypted: true, phone_iv: true } },
+      },
+    });
+    const recipientName = recipientUser?.full_name ?? recipientUser?.donors?.full_name ?? null;
+    const recipientPhoneEncrypted = recipientUser?.phone_encrypted ?? recipientUser?.donors?.phone_encrypted ?? null;
+    const recipientPhoneIv = recipientUser?.phone_iv ?? recipientUser?.donors?.phone_iv ?? null;
+    if (!recipientPhoneEncrypted || !recipientPhoneIv) {
       return reply.unprocessableEntity('Recipient contact unavailable');
     }
 
-    await sql`UPDATE blood_requests SET status = 'matched' WHERE id = ${id}`;
-    await sql`
-      INSERT INTO handshakes (request_id, donor_id) VALUES (${id}, ${donor.id})
-    `;
+    // Transactional: a request must never end up 'matched' without a
+    // corresponding handshake row, or vice versa. Upsert instead of create --
+    // a prior cancel-match leaves its (cancelled) handshake row in place
+    // (see cancel-match below), and handshakes.request_id is @unique, so a
+    // second accept on the same request must revive that row, not insert a
+    // new one.
+    await prisma.$transaction(async (tx) => {
+      await tx.blood_requests.update({ where: { id }, data: { status: 'matched' } });
+      await tx.handshakes.upsert({
+        where: { request_id: id },
+        create: { request_id: id, donor_id: donor.id },
+        update: { donor_id: donor.id, matched_at: new Date(), cancelled_at: null },
+      });
+    });
     await cancelNotificationTiers(id);
 
-    const recipientPhone = decrypt(recipient.phone_encrypted as string, recipient.phone_iv as string);
+    const recipientPhone = decrypt(recipientPhoneEncrypted, recipientPhoneIv);
 
     return reply.send({
       matched: true,
       recipient: {
-        name: recipient.name,
+        name: recipientName,
         phone: recipientPhone,
       },
       request: {
@@ -278,23 +358,23 @@ export async function requestRoutes(app: FastifyInstance) {
     const firebaseUid = request.userId!;
     const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
 
-    const [donor] = await sql`SELECT id FROM donors WHERE firebase_uid = ${firebaseUid}`;
+    const donor = await prisma.donors.findUnique({ where: { firebase_uid: firebaseUid }, select: { id: true } });
     if (!donor) return reply.forbidden('Donor profile not found');
 
-    const [handshake] = await sql`
-      SELECT id, matched_at FROM handshakes WHERE request_id = ${id} AND donor_id = ${donor.id} AND cancelled_at IS NULL
-    `;
+    const handshake = await prisma.handshakes.findFirst({
+      where: { request_id: id, donor_id: donor.id, cancelled_at: null },
+      select: { id: true, matched_at: true },
+    });
     if (!handshake) return reply.notFound('No active match found');
 
     // 7.3 Enforce 30-minute window
-    const matchedAt = new Date(handshake.matched_at);
-    const elapsedMinutes = (Date.now() - matchedAt.getTime()) / 60000;
+    const elapsedMinutes = (Date.now() - handshake.matched_at.getTime()) / 60000;
     if (elapsedMinutes > MATCH_CANCEL_WINDOW_MINUTES) {
       return reply.forbidden(`Cancellation window of ${MATCH_CANCEL_WINDOW_MINUTES} minutes has passed`);
     }
 
-    await sql`UPDATE handshakes SET cancelled_at = NOW() WHERE id = ${handshake.id}`;
-    await sql`UPDATE blood_requests SET status = 'open' WHERE id = ${id}`;
+    await prisma.handshakes.update({ where: { id: handshake.id }, data: { cancelled_at: new Date() } });
+    await prisma.blood_requests.update({ where: { id }, data: { status: 'open' } });
     await scheduleNotificationTiers(id);
 
     return reply.send({ ok: true, message: 'Match cancelled. Resuming notifications.' });
@@ -305,17 +385,18 @@ export async function requestRoutes(app: FastifyInstance) {
     const firebaseUid = request.userId!;
     const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
 
-    const [donor] = await sql`SELECT id, blood_group FROM donors WHERE firebase_uid = ${firebaseUid}`;
+    const donor = await prisma.donors.findUnique({ where: { firebase_uid: firebaseUid }, select: { id: true, blood_group: true } });
     if (!donor) return reply.forbidden('Donor profile not found');
 
-    const [handshake] = await sql`
-      SELECT id FROM handshakes WHERE request_id = ${id} AND donor_id = ${donor.id} AND cancelled_at IS NULL
-    `;
+    const handshake = await prisma.handshakes.findFirst({
+      where: { request_id: id, donor_id: donor.id, cancelled_at: null },
+      select: { id: true },
+    });
     if (!handshake) return reply.forbidden('No active match for this request');
 
-    await sql.begin(async (tx) => {
+    await prisma.$transaction(async (tx) => {
       await recordDonationForRequest(id, tx);
-      await tx`UPDATE blood_requests SET status = 'fulfilled' WHERE id = ${id}`;
+      await tx.blood_requests.update({ where: { id }, data: { status: 'fulfilled' } });
     });
 
     return reply.send({ ok: true, message: 'Donation recorded. You are in cooldown for 90 days.' });

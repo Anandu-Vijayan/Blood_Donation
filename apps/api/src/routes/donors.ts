@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../plugins/auth.js';
-import { sql } from '../db/client.js';
+import { prisma, updateOrNull } from '../db/prisma.js';
 import { encrypt, decrypt } from '../lib/crypto.js';
 import { BLOOD_GROUPS, COOLDOWN_DAYS } from '../lib/constants.js';
 
@@ -25,18 +25,25 @@ export async function donorRoutes(app: FastifyInstance) {
     const { encrypted, iv } = encrypt(request.phoneNumber);
 
     // Ensure user row exists (FK target for donors)
-    await sql`
-      INSERT INTO users (firebase_uid, is_donor) VALUES (${firebaseUid}, TRUE)
-      ON CONFLICT (firebase_uid) DO UPDATE SET is_donor = TRUE
-    `;
+    await prisma.users.upsert({
+      where: { firebase_uid: firebaseUid },
+      create: { firebase_uid: firebaseUid, is_donor: true },
+      update: { is_donor: true },
+    });
 
-    const existing = await sql`SELECT id FROM donors WHERE firebase_uid = ${firebaseUid}`;
-    if (existing.length > 0) {
-      const donor = await sql`SELECT id, blood_group, availability, donation_count FROM donors WHERE firebase_uid = ${firebaseUid}`;
-      return reply.send(donor[0]);
+    const existing = await prisma.donors.findUnique({
+      where: { firebase_uid: firebaseUid },
+      select: { id: true, blood_group: true, availability: true, donation_count: true },
+    });
+    if (existing) {
+      return reply.send(existing);
     }
 
-    const [donor] = await sql`
+    // location is an Unsupported("geometry") column -- Prisma Client cannot
+    // write to it at all, so this insert stays raw SQL via $queryRaw.
+    const [donor] = await prisma.$queryRaw<
+      { id: number; blood_group: string; availability: boolean; donation_count: number }[]
+    >`
       INSERT INTO donors (firebase_uid, blood_group, location, full_name, phone_encrypted, phone_iv, availability)
       VALUES (
         ${firebaseUid},
@@ -50,7 +57,7 @@ export async function donorRoutes(app: FastifyInstance) {
       RETURNING id, blood_group, availability, donation_count
     `;
 
-    await sql`UPDATE users SET is_donor = TRUE WHERE firebase_uid = ${firebaseUid}`;
+    await prisma.users.update({ where: { firebase_uid: firebaseUid }, data: { is_donor: true } });
 
     return reply.code(201).send(donor);
   });
@@ -60,7 +67,7 @@ export async function donorRoutes(app: FastifyInstance) {
     const firebaseUid = request.userId!;
     const body = z.object({ latitude: z.number(), longitude: z.number() }).parse(request.body);
 
-    const [donor] = await sql`
+    const [donor] = await prisma.$queryRaw<{ id: number }[]>`
       UPDATE donors
       SET location = ST_SetSRID(ST_MakePoint(${body.longitude}, ${body.latitude}), 4326)
       WHERE firebase_uid = ${firebaseUid}
@@ -75,11 +82,13 @@ export async function donorRoutes(app: FastifyInstance) {
     const firebaseUid = request.userId!;
     const body = z.object({ available: z.boolean() }).parse(request.body);
 
-    const [donor] = await sql`
-      UPDATE donors SET availability = ${body.available}
-      WHERE firebase_uid = ${firebaseUid}
-      RETURNING id, availability
-    `;
+    const donor = await updateOrNull(() =>
+      prisma.donors.update({
+        where: { firebase_uid: firebaseUid },
+        data: { availability: body.available },
+        select: { id: true, availability: true },
+      }),
+    );
     if (!donor) return reply.notFound('Donor profile not found');
     return reply.send(donor);
   });
@@ -93,12 +102,13 @@ export async function donorRoutes(app: FastifyInstance) {
 
     const { encrypted, iv } = encrypt(request.phoneNumber);
 
-    const [donor] = await sql`
-      UPDATE donors
-      SET phone_encrypted = ${encrypted}, phone_iv = ${iv}
-      WHERE firebase_uid = ${firebaseUid}
-      RETURNING id
-    `;
+    const donor = await updateOrNull(() =>
+      prisma.donors.update({
+        where: { firebase_uid: firebaseUid },
+        data: { phone_encrypted: encrypted, phone_iv: iv },
+        select: { id: true },
+      }),
+    );
     if (!donor) return reply.notFound('Donor profile not found');
     return reply.send({ ok: true });
   });
@@ -108,11 +118,13 @@ export async function donorRoutes(app: FastifyInstance) {
     const firebaseUid = request.userId!;
     const body = z.object({ blood_group: bloodGroupEnum }).parse(request.body);
 
-    const [donor] = await sql`
-      UPDATE donors SET blood_group = ${body.blood_group}
-      WHERE firebase_uid = ${firebaseUid}
-      RETURNING id, blood_group
-    `;
+    const donor = await updateOrNull(() =>
+      prisma.donors.update({
+        where: { firebase_uid: firebaseUid },
+        data: { blood_group: body.blood_group },
+        select: { id: true, blood_group: true },
+      }),
+    );
     if (!donor) return reply.notFound('Donor profile not found');
     return reply.send(donor);
   });
@@ -122,11 +134,13 @@ export async function donorRoutes(app: FastifyInstance) {
     const firebaseUid = request.userId!;
     const body = z.object({ full_name: z.string().min(1) }).parse(request.body);
 
-    const [donor] = await sql`
-      UPDATE donors SET full_name = ${body.full_name}
-      WHERE firebase_uid = ${firebaseUid}
-      RETURNING id, full_name
-    `;
+    const donor = await updateOrNull(() =>
+      prisma.donors.update({
+        where: { firebase_uid: firebaseUid },
+        data: { full_name: body.full_name },
+        select: { id: true, full_name: true },
+      }),
+    );
     if (!donor) return reply.notFound('Donor profile not found');
     return reply.send(donor);
   });
@@ -134,14 +148,28 @@ export async function donorRoutes(app: FastifyInstance) {
   // 4.4 GET /donors/me
   app.get('/me', { preHandler: requireAuth }, async (request, reply) => {
     const firebaseUid = request.userId!;
-    const [donor] = await sql`
+    const [donor] = await prisma.$queryRaw<
+      {
+        id: number;
+        blood_group: string;
+        availability: boolean;
+        donation_count: number;
+        full_name: string;
+        last_donated_at: Date | null;
+        phone_encrypted: string;
+        phone_iv: string;
+        longitude: number | null;
+        latitude: number | null;
+        in_cooldown: boolean;
+      }[]
+    >`
       SELECT
         id, blood_group, availability, donation_count, full_name,
         last_donated_at,
         phone_encrypted, phone_iv,
         ST_X(location::geometry) AS longitude,
         ST_Y(location::geometry) AS latitude,
-        (last_donated_at IS NOT NULL AND last_donated_at > NOW() - INTERVAL '${sql(String(COOLDOWN_DAYS))} days') AS in_cooldown
+        (last_donated_at IS NOT NULL AND last_donated_at > NOW() - (${COOLDOWN_DAYS} * INTERVAL '1 day')) AS in_cooldown
       FROM donors WHERE firebase_uid = ${firebaseUid}
     `;
     if (!donor) return reply.notFound('Donor profile not found');
@@ -165,12 +193,26 @@ export async function donorRoutes(app: FastifyInstance) {
   // GET /donors/me/matches
   app.get('/me/matches', { preHandler: requireAuth }, async (request, reply) => {
     const firebaseUid = request.userId!;
-    const [donor] = await sql`
-      SELECT id, full_name, phone_encrypted, phone_iv, location FROM donors WHERE firebase_uid = ${firebaseUid}
-    `;
+    const donor = await prisma.donors.findUnique({
+      where: { firebase_uid: firebaseUid },
+      select: { id: true, full_name: true, phone_encrypted: true, phone_iv: true },
+    });
     if (!donor) return reply.notFound('Donor profile not found');
 
-    const matches = await sql`
+    const matches = await prisma.$queryRaw<
+      {
+        request_id: number;
+        blood_group: string;
+        units: number;
+        hospital_name: string;
+        urgency: string;
+        status: string;
+        created_at: Date;
+        matched_at: Date;
+        recipient_name: string | null;
+        distance_km: string | null;
+      }[]
+    >`
       SELECT
         br.id AS request_id,
         br.blood_group,
@@ -221,14 +263,14 @@ export async function donorRoutes(app: FastifyInstance) {
   // GET /donors/me/donations (Task 8.2)
   app.get('/me/donations', { preHandler: requireAuth }, async (request, reply) => {
     const firebaseUid = request.userId!;
-    const [donor] = await sql`SELECT id FROM donors WHERE firebase_uid = ${firebaseUid}`;
+    const donor = await prisma.donors.findUnique({ where: { firebase_uid: firebaseUid }, select: { id: true } });
     if (!donor) return reply.notFound('Donor profile not found');
 
-    const donations = await sql`
-      SELECT blood_group, donated_at, request_id
-      FROM donations WHERE donor_id = ${donor.id}
-      ORDER BY donated_at DESC
-    `;
+    const donations = await prisma.donations.findMany({
+      where: { donor_id: donor.id },
+      orderBy: { donated_at: 'desc' },
+      select: { blood_group: true, donated_at: true, request_id: true },
+    });
     return reply.send(donations);
   });
 
@@ -236,7 +278,9 @@ export async function donorRoutes(app: FastifyInstance) {
   app.post('/me/push-token', { preHandler: requireAuth }, async (request, reply) => {
     const firebaseUid = request.userId!;
     const body = z.object({ token: z.string() }).parse(request.body);
-    await sql`UPDATE donors SET push_token = ${body.token} WHERE firebase_uid = ${firebaseUid}`;
+    // updateMany, not update: original behavior never 404s here even if no
+    // donor row matches -- it always just returns { ok: true }.
+    await prisma.donors.updateMany({ where: { firebase_uid: firebaseUid }, data: { push_token: body.token } });
     return reply.send({ ok: true });
   });
 }

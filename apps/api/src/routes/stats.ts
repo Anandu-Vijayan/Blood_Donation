@@ -1,18 +1,19 @@
 import { FastifyInstance } from 'fastify';
-import { sql } from '../db/client.js';
+import { prisma } from '../db/prisma.js';
 
 export async function statsRoutes(app: FastifyInstance) {
   const handler = async () => {
-    const [row] = await sql`
-      SELECT
-        (SELECT COUNT(*)::int FROM blood_requests) AS total_requests,
-        (SELECT COUNT(*)::int FROM blood_requests WHERE status = 'open') AS total_open,
-        (SELECT COUNT(*)::int FROM blood_requests WHERE status = 'matched') AS total_in_process,
-        (SELECT COUNT(*)::int FROM blood_requests WHERE status = 'fulfilled') AS total_fulfilled,
-        (SELECT COUNT(*)::int FROM donors) AS total_donors,
-        (SELECT COUNT(*)::int FROM hospitals) AS total_hospitals
-    `;
-    return row;
+    const [total_requests, total_open, total_in_process, total_fulfilled, total_donors, total_hospitals] =
+      await Promise.all([
+        prisma.blood_requests.count(),
+        prisma.blood_requests.count({ where: { status: 'open' } }),
+        prisma.blood_requests.count({ where: { status: 'matched' } }),
+        prisma.blood_requests.count({ where: { status: 'fulfilled' } }),
+        prisma.donors.count(),
+        prisma.hospitals.count(),
+      ]);
+
+    return { total_requests, total_open, total_in_process, total_fulfilled, total_donors, total_hospitals };
   };
 
   // Public — no auth required

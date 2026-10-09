@@ -9,7 +9,7 @@ import { recipientRoutes } from './routes/recipient.js';
 import { statsRoutes } from './routes/stats.js';
 import { startNotificationWorker, stopNotificationWorker } from './workers/notification.worker.js';
 import { migrate } from './db/migrate.js';
-import { sql } from './db/client.js';
+import { prisma } from './db/prisma.js';
 import { redis } from './lib/redis.js';
 import { loadConfig, getCorsOrigins } from './config.js';
 import { registerErrorHandler } from './plugins/errors.js';
@@ -37,7 +37,7 @@ await app.register(statsRoutes);
 
 app.get('/health', async (_request, reply) => {
   try {
-    await sql`SELECT 1`;
+    await prisma.$queryRaw`SELECT 1`;
     const pong = await redis.ping();
     if (pong !== 'PONG') {
       return reply.code(503).send({ ok: false, error: 'Redis unhealthy' });
@@ -59,7 +59,7 @@ async function shutdown(signal: string) {
   app.log.info(`Received ${signal}, shutting down`);
   await app.close();
   await stopNotificationWorker();
-  await sql.end();
+  await prisma.$disconnect();
   redis.disconnect();
   process.exit(0);
 }

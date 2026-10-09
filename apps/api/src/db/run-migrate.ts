@@ -1,6 +1,6 @@
 import { migrate } from './migrate.js';
-import { sql } from './client.js';
+import { prisma } from './prisma.js';
 
 await migrate();
-await sql.end();
+await prisma.$disconnect();
 console.log('Migrations completed');

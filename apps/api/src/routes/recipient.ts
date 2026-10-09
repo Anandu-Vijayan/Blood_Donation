@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../plugins/auth.js';
-import { sql } from '../db/client.js';
+import { prisma, Prisma } from '../db/prisma.js';
 import { encrypt, decrypt } from '../lib/crypto.js';
 import { BLOOD_GROUPS } from '../lib/constants.js';
 
@@ -15,11 +15,25 @@ const updateRecipientSchema = z.object({
   longitude: z.number().optional(),
 });
 
+interface UserGeoRow {
+  id: number;
+  firebase_uid: string;
+  full_name: string | null;
+  blood_group: string | null;
+  phone_encrypted: string | null;
+  phone_iv: string | null;
+  is_recipient: boolean;
+  longitude: number | null;
+  latitude: number | null;
+}
+
 export async function recipientRoutes(app: FastifyInstance) {
   // GET /recipient/me — Get current recipient profile
   app.get('/me', { preHandler: requireAuth }, async (request, reply) => {
     const firebaseUid = request.userId!;
-    const [user] = await sql`
+    // users.location is an Unsupported("geometry") column -- ST_X/ST_Y
+    // extraction stays raw SQL via $queryRaw, same as donors.ts's geometry reads.
+    const [user] = await prisma.$queryRaw<UserGeoRow[]>`
       SELECT
         id,
         firebase_uid,
@@ -60,15 +74,23 @@ export async function recipientRoutes(app: FastifyInstance) {
     const firebaseUid = request.userId!;
 
     // 1. Get total requests by this recipient
-    const [reqCountRow] = await sql`
-      SELECT COUNT(*)::int AS count
-      FROM blood_requests
-      WHERE recipient_firebase_uid = ${firebaseUid}
-    `;
-    const totalRequests = reqCountRow?.count || 0;
+    const totalRequests = await prisma.blood_requests.count({
+      where: { recipient_firebase_uid: firebaseUid },
+    });
 
     // 2. Get recipient's location and blood group (from users or latest blood request)
-    const [recipientInfo] = await sql`
+    // Both users.location and blood_requests.hospital_location are
+    // Unsupported("geometry") columns -- stays raw SQL via $queryRaw.
+    const [recipientInfo] = await prisma.$queryRaw<
+      {
+        blood_group: string | null;
+        u_lng: number | null;
+        u_lat: number | null;
+        r_lng: number | null;
+        r_lat: number | null;
+        req_blood_group: string | null;
+      }[]
+    >`
       SELECT
         u.blood_group,
         ST_X(u.location::geometry) AS u_lng,
@@ -90,7 +112,7 @@ export async function recipientRoutes(app: FastifyInstance) {
     let nearbyDonorsCount = 0;
 
     if (hasUserLoc) {
-      const [donorCountRow] = await sql`
+      const [donorCountRow] = await prisma.$queryRaw<{ count: number }[]>`
         SELECT COUNT(*)::int AS count
         FROM donors d
         JOIN users u ON u.firebase_uid = ${firebaseUid}
@@ -100,13 +122,13 @@ export async function recipientRoutes(app: FastifyInstance) {
       `;
       nearbyDonorsCount = donorCountRow?.count || 0;
     } else if (hasReqLoc) {
-      const [donorCountRow] = await sql`
+      const [donorCountRow] = await prisma.$queryRaw<{ count: number }[]>`
         SELECT COUNT(*)::int AS count
         FROM donors d
         WHERE d.availability = TRUE
           AND ST_DWithin(
             d.location::geography,
-            ST_SetSRID(ST_MakePoint(${recipientInfo.r_lng}, ${recipientInfo.r_lat}), 4326)::geography,
+            ST_SetSRID(ST_MakePoint(${recipientInfo!.r_lng}, ${recipientInfo!.r_lat}), 4326)::geography,
             50000
           )
           AND (${bg}::text IS NULL OR d.blood_group = ${bg})
@@ -114,13 +136,12 @@ export async function recipientRoutes(app: FastifyInstance) {
       nearbyDonorsCount = donorCountRow?.count || 0;
     } else {
       // Fallback if no location recorded yet: count all available donors (filtered by blood group if set)
-      const [donorCountRow] = await sql`
-        SELECT COUNT(*)::int AS count
-        FROM donors d
-        WHERE d.availability = TRUE
-          AND (${bg}::text IS NULL OR d.blood_group = ${bg})
-      `;
-      nearbyDonorsCount = donorCountRow?.count || 0;
+      nearbyDonorsCount = await prisma.donors.count({
+        where: {
+          availability: true,
+          ...(bg ? { blood_group: bg } : {}),
+        },
+      });
     }
 
     return reply.send({
@@ -149,10 +170,13 @@ export async function recipientRoutes(app: FastifyInstance) {
 
     const lat = body.latitude ?? 0;
     const lng = body.longitude ?? 0;
-    const locationFragment = hasLoc ? sql`ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)` : null;
+    const locationFragment = hasLoc
+      ? Prisma.sql`ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)`
+      : Prisma.sql`NULL`;
 
-    // Upsert into users table
-    await sql`
+    // users.location is an Unsupported("geometry") column -- this upsert
+    // stays raw SQL via $executeRaw, same as donors.ts's geometry writes.
+    await prisma.$executeRaw`
       INSERT INTO users (
         firebase_uid,
         is_recipient,
@@ -183,7 +207,7 @@ export async function recipientRoutes(app: FastifyInstance) {
         phone_iv = COALESCE(${phoneIv}, users.phone_iv)
     `;
 
-    const [updatedUser] = await sql`
+    const [updatedUser] = await prisma.$queryRaw<UserGeoRow[]>`
       SELECT
         id,
         firebase_uid,

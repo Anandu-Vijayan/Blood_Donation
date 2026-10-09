@@ -1,26 +1,27 @@
-import { sql } from '../db/client.js';
+import { prisma } from '../db/prisma.js';
 import { auth } from '../lib/firebase.js';
 import { cancelNotificationTiers } from '../workers/notification.worker.js';
 
 export async function deleteUserAccount(firebaseUid: string): Promise<boolean> {
-  const [user] = await sql`SELECT id FROM users WHERE firebase_uid = ${firebaseUid}`;
+  const user = await prisma.users.findUnique({ where: { firebase_uid: firebaseUid }, select: { id: true } });
   if (!user) return false;
 
-  const [donor] = await sql`SELECT id FROM donors WHERE firebase_uid = ${firebaseUid}`;
-  const donorId = donor ? (donor.id as number) : undefined;
+  const donor = await prisma.donors.findUnique({ where: { firebase_uid: firebaseUid }, select: { id: true } });
+  const donorId = donor?.id;
 
-  const recipientRows = await sql`
-    SELECT id FROM blood_requests WHERE recipient_firebase_uid = ${firebaseUid}
-  `;
-  const recipientRequestIds = recipientRows.map((r) => r.id as number);
+  const recipientRequests = await prisma.blood_requests.findMany({
+    where: { recipient_firebase_uid: firebaseUid },
+    select: { id: true },
+  });
+  const recipientRequestIds = recipientRequests.map((r) => r.id);
 
   let matchedAsDonorRequestIds: number[] = [];
   if (donorId !== undefined) {
-    const matchedRows = await sql`
-      SELECT request_id FROM handshakes
-      WHERE donor_id = ${donorId} AND cancelled_at IS NULL
-    `;
-    matchedAsDonorRequestIds = matchedRows.map((r) => r.request_id as number);
+    const matchedHandshakes = await prisma.handshakes.findMany({
+      where: { donor_id: donorId, cancelled_at: null },
+      select: { request_id: true },
+    });
+    matchedAsDonorRequestIds = matchedHandshakes.map((h) => h.request_id);
   }
 
   const recipientSet = new Set(recipientRequestIds);
@@ -34,57 +35,50 @@ export async function deleteUserAccount(firebaseUid: string): Promise<boolean> {
 
   const reopenIds = matchedAsDonorRequestIds.filter((id) => !recipientSet.has(id));
   if (reopenIds.length > 0) {
-    await sql`
-      UPDATE blood_requests SET status = 'open'
-      WHERE id IN ${sql(reopenIds)}
-    `;
+    await prisma.blood_requests.updateMany({
+      where: { id: { in: reopenIds } },
+      data: { status: 'open' },
+    });
   }
 
-  await sql.begin(async (tx) => {
+  await prisma.$transaction(async (tx) => {
     if (recipientRequestIds.length > 0 && donorId !== undefined) {
-      await tx`
-        DELETE FROM notifications_log
-        WHERE request_id IN ${tx(recipientRequestIds)} OR donor_id = ${donorId}
-      `;
+      await tx.notifications_log.deleteMany({
+        where: { OR: [{ request_id: { in: recipientRequestIds } }, { donor_id: donorId }] },
+      });
     } else if (recipientRequestIds.length > 0) {
-      await tx`
-        DELETE FROM notifications_log WHERE request_id IN ${tx(recipientRequestIds)}
-      `;
+      await tx.notifications_log.deleteMany({ where: { request_id: { in: recipientRequestIds } } });
     } else if (donorId !== undefined) {
-      await tx`DELETE FROM notifications_log WHERE donor_id = ${donorId}`;
+      await tx.notifications_log.deleteMany({ where: { donor_id: donorId } });
     }
 
     if (recipientRequestIds.length > 0) {
-      await tx`
-        DELETE FROM notifications_queue WHERE request_id IN ${tx(recipientRequestIds)}
-      `;
+      await tx.notifications_queue.deleteMany({ where: { request_id: { in: recipientRequestIds } } });
     }
 
     if (recipientRequestIds.length > 0 && donorId !== undefined) {
-      await tx`
-        DELETE FROM handshakes
-        WHERE request_id IN ${tx(recipientRequestIds)} OR donor_id = ${donorId}
-      `;
+      await tx.handshakes.deleteMany({
+        where: { OR: [{ request_id: { in: recipientRequestIds } }, { donor_id: donorId }] },
+      });
     } else if (recipientRequestIds.length > 0) {
-      await tx`DELETE FROM handshakes WHERE request_id IN ${tx(recipientRequestIds)}`;
+      await tx.handshakes.deleteMany({ where: { request_id: { in: recipientRequestIds } } });
     } else if (donorId !== undefined) {
-      await tx`DELETE FROM handshakes WHERE donor_id = ${donorId}`;
+      await tx.handshakes.deleteMany({ where: { donor_id: donorId } });
     }
 
     if (recipientRequestIds.length > 0 && donorId !== undefined) {
-      await tx`
-        DELETE FROM donations
-        WHERE donor_id = ${donorId} OR request_id IN ${tx(recipientRequestIds)}
-      `;
+      await tx.donations.deleteMany({
+        where: { OR: [{ donor_id: donorId }, { request_id: { in: recipientRequestIds } }] },
+      });
     } else if (recipientRequestIds.length > 0) {
-      await tx`DELETE FROM donations WHERE request_id IN ${tx(recipientRequestIds)}`;
+      await tx.donations.deleteMany({ where: { request_id: { in: recipientRequestIds } } });
     } else if (donorId !== undefined) {
-      await tx`DELETE FROM donations WHERE donor_id = ${donorId}`;
+      await tx.donations.deleteMany({ where: { donor_id: donorId } });
     }
 
-    await tx`DELETE FROM blood_requests WHERE recipient_firebase_uid = ${firebaseUid}`;
-    await tx`DELETE FROM donors WHERE firebase_uid = ${firebaseUid}`;
-    await tx`DELETE FROM users WHERE firebase_uid = ${firebaseUid}`;
+    await tx.blood_requests.deleteMany({ where: { recipient_firebase_uid: firebaseUid } });
+    await tx.donors.deleteMany({ where: { firebase_uid: firebaseUid } });
+    await tx.users.deleteMany({ where: { firebase_uid: firebaseUid } });
   });
 
   try {
