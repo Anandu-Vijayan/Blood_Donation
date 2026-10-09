@@ -5,6 +5,9 @@ node_modules/
 dist/
 packages/shared/dist/
 
+# Generated Prisma Client (rebuilt via `prisma generate`, never hand-edited)
+apps/api/src/generated/prisma/
+
 # Secrets — NEVER commit real credentials
 .env
 .env.*
@@ -25,6 +28,12 @@ secrets/
 # IDE
 .idea/
 .vscode/
+
+# AI agent skill installs (per-developer, not app code)
+.agents/
+.windsurf/
+apps/api/.claude/
+skills-lock.json
 
 # Legacy mobile (if folder still present locally)
 .expo/

@@ -1,0 +1,128 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model blood_requests {
+  id                     Int                     @id @default(autoincrement())
+  recipient_firebase_uid String
+  blood_group            String
+  units                  Int
+  hospital_name          String
+  hospital_location      Unsupported("geometry")
+  urgency                String
+  status                 String                  @default("open")
+  last_tier_radius_km    Int                     @default(0)
+  created_at             DateTime                @default(now()) @db.Timestamptz(6)
+  requirement_type       String                  @default("standby")
+  requirement_date       DateTime?               @db.Timestamptz(6)
+  users                  users                   @relation(fields: [recipient_firebase_uid], references: [firebase_uid], onDelete: NoAction, onUpdate: NoAction)
+  donations              donations[]
+  handshakes             handshakes?
+  notifications_log      notifications_log[]
+  notifications_queue    notifications_queue[]
+
+  @@index([hospital_location], map: "blood_requests_location_idx", type: Gist)
+}
+
+model donations {
+  id             Int             @id @default(autoincrement())
+  donor_id       Int
+  request_id     Int?
+  blood_group    String
+  donated_at     DateTime        @default(now()) @db.Timestamptz(6)
+  donors         donors          @relation(fields: [donor_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  blood_requests blood_requests? @relation(fields: [request_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model donors {
+  id                Int                      @id @default(autoincrement())
+  firebase_uid      String                   @unique(map: "donors_clerk_user_id_key")
+  blood_group       String
+  location          Unsupported("geometry")?
+  availability      Boolean                  @default(true)
+  push_token        String?
+  last_donated_at   DateTime?                @db.Timestamptz(6)
+  donation_count    Int                      @default(0)
+  phone_encrypted   String
+  phone_iv          String
+  full_name         String
+  created_at        DateTime                 @default(now()) @db.Timestamptz(6)
+  donations         donations[]
+  users             users                    @relation(fields: [firebase_uid], references: [firebase_uid], onDelete: NoAction, onUpdate: NoAction)
+  handshakes        handshakes[]
+  notifications_log notifications_log[]
+
+  @@index([location], type: Gist)
+}
+
+model handshakes {
+  id             Int            @id @default(autoincrement())
+  request_id     Int            @unique
+  donor_id       Int
+  matched_at     DateTime       @default(now()) @db.Timestamptz(6)
+  cancelled_at   DateTime?      @db.Timestamptz(6)
+  donors         donors         @relation(fields: [donor_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  blood_requests blood_requests @relation(fields: [request_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
+model hospitals {
+  id         Int                      @id @default(autoincrement())
+  name       String
+  city       String
+  district   String                   @default("")
+  latitude   Float
+  longitude  Float
+  location   Unsupported("geometry")? @default(dbgenerated("st_setsrid(st_makepoint(longitude, latitude), 4326)"))
+  is_custom  Boolean                  @default(false)
+  created_at DateTime                 @default(now()) @db.Timestamptz(6)
+
+  @@index([location], type: Gist)
+}
+
+model notifications_log {
+  id             Int            @id @default(autoincrement())
+  request_id     Int
+  donor_id       Int
+  tier           Int
+  sent_at        DateTime       @default(now()) @db.Timestamptz(6)
+  donors         donors         @relation(fields: [donor_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  blood_requests blood_requests @relation(fields: [request_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([request_id, donor_id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model notifications_queue {
+  id             Int            @id @default(autoincrement())
+  request_id     Int
+  tier_index     Int
+  status         String         @default("pending")
+  scheduled_for  DateTime       @db.Timestamptz(6)
+  created_at     DateTime       @default(now()) @db.Timestamptz(6)
+  blood_requests blood_requests @relation(fields: [request_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model users {
+  id              Int                      @id @default(autoincrement())
+  firebase_uid    String                   @unique(map: "users_clerk_user_id_key")
+  is_donor        Boolean                  @default(false)
+  is_recipient    Boolean                  @default(false)
+  created_at      DateTime                 @default(now()) @db.Timestamptz(6)
+  full_name       String?
+  phone_encrypted String?
+  phone_iv        String?
+  blood_group     String?
+  location        Unsupported("geometry")?
+  blood_requests  blood_requests[]
+  donors          donors?
+
+  @@index([location], type: Gist)
+}

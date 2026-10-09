@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../plugins/auth.js';
-import { sql } from '../db/client.js';
+import { prisma } from '../db/prisma.js';
 import { decrypt } from '../lib/crypto.js';
 import { deleteUserAccount } from '../services/deleteUser.js';
 
@@ -16,22 +16,21 @@ export async function userRoutes(app: FastifyInstance) {
     const firebaseUid = request.userId!;
     const body = roleSchema.parse(request.body);
 
-    const [user] = await sql`
-      INSERT INTO users (firebase_uid, is_donor, is_recipient)
-      VALUES (${firebaseUid}, ${body.is_donor}, ${body.is_recipient})
-      ON CONFLICT (firebase_uid) DO UPDATE
-        SET is_donor = EXCLUDED.is_donor, is_recipient = EXCLUDED.is_recipient
-      RETURNING id, firebase_uid, is_donor, is_recipient
-    `;
+    const user = await prisma.users.upsert({
+      where: { firebase_uid: firebaseUid },
+      create: { firebase_uid: firebaseUid, is_donor: body.is_donor, is_recipient: body.is_recipient },
+      update: { is_donor: body.is_donor, is_recipient: body.is_recipient },
+      select: { id: true, firebase_uid: true, is_donor: true, is_recipient: true },
+    });
     return reply.send(user);
   });
 
   app.get('/me', { preHandler: requireAuth }, async (request, reply) => {
     const firebaseUid = request.userId!;
-    const [user] = await sql`
-      SELECT id, firebase_uid, is_donor, is_recipient, created_at
-      FROM users WHERE firebase_uid = ${firebaseUid}
-    `;
+    const user = await prisma.users.findUnique({
+      where: { firebase_uid: firebaseUid },
+      select: { id: true, firebase_uid: true, is_donor: true, is_recipient: true, created_at: true },
+    });
     if (!user) return reply.notFound('User not found');
     return reply.send(user);
   });
@@ -44,7 +43,24 @@ export async function userRoutes(app: FastifyInstance) {
 
   app.get('/me/requests', { preHandler: requireAuth }, async (request, reply) => {
     const firebaseUid = request.userId!;
-    const rows = await sql`
+    // hospital_location is an Unsupported("geometry") column -- the
+    // ST_DWithin proximity subquery stays raw SQL via $queryRaw.
+    const rows = await prisma.$queryRaw<
+      {
+        id: number;
+        blood_group: string;
+        units: number;
+        hospital_name: string;
+        urgency: string;
+        status: string;
+        created_at: Date;
+        nearby_donors_count: number;
+        donor_name: string | null;
+        donor_phone_encrypted: string | null;
+        donor_phone_iv: string | null;
+        matched_at: Date | null;
+      }[]
+    >`
       SELECT
         br.id,
         br.blood_group,
@@ -79,7 +95,7 @@ export async function userRoutes(app: FastifyInstance) {
           ? {
               name: r.donor_name as string,
               phone: decrypt(r.donor_phone_encrypted as string, r.donor_phone_iv as string),
-              matched_at: r.matched_at as string,
+              matched_at: r.matched_at,
             }
           : null;
       return {
@@ -104,9 +120,10 @@ export async function userRoutes(app: FastifyInstance) {
     const firebaseUid = request.userId!;
 
     // Find donor profile associated with this user
-    const [donor] = await sql`
-      SELECT id FROM donors WHERE firebase_uid = ${firebaseUid}
-    `;
+    const donor = await prisma.donors.findUnique({
+      where: { firebase_uid: firebaseUid },
+      select: { id: true },
+    });
 
     if (!donor) {
       return reply.send({
@@ -119,21 +136,13 @@ export async function userRoutes(app: FastifyInstance) {
       });
     }
 
-    const [stats] = await sql`
-      SELECT
-        (SELECT COUNT(*)::int FROM donations WHERE donor_id = ${donor.id}) AS completed_donations,
-        (
-          SELECT COUNT(*)::int
-          FROM handshakes h
-          JOIN blood_requests br ON br.id = h.request_id
-          WHERE h.donor_id = ${donor.id}
-            AND h.cancelled_at IS NULL
-            AND br.status = 'matched'
-        ) AS active_donations
-    `;
+    const [completed, active] = await Promise.all([
+      prisma.donations.count({ where: { donor_id: donor.id } }),
+      prisma.handshakes.count({
+        where: { donor_id: donor.id, cancelled_at: null, blood_requests: { status: 'matched' } },
+      }),
+    ]);
 
-    const completed = stats.completed_donations || 0;
-    const active = stats.active_donations || 0;
     const total = completed + active;
 
     return reply.send({
