@@ -2,6 +2,7 @@
   "name": "blood-donation-api",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@12.8.1",
   "workspaces": [
     "apps/api",
     "packages/shared"
