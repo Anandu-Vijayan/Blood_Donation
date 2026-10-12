@@ -30,7 +30,7 @@ function buildRedisOptions(url: string): RedisOptions {
 
   return {
     maxRetriesPerRequest: null, // required by BullMQ
-    enableReadyCheck: true,
+    enableReadyCheck: false, // Upstash users may lack INFO permission (NOPERM)
     connectTimeout: 10_000,
     retryStrategy: (times) => Math.min(times * 200, 5_000),
     ...(isTls && !url.startsWith('rediss://') ? { tls: {} } : {}),

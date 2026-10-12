@@ -53,7 +53,7 @@ if (config.RUN_MIGRATIONS_ON_START) {
   await migrate();
 }
 
-startNotificationWorker();
+await startNotificationWorker();
 
 async function shutdown(signal: string) {
   app.log.info(`Received ${signal}, shutting down`);

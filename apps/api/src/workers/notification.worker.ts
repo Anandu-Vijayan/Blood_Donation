@@ -4,7 +4,10 @@ import { redis } from '../lib/redis.js';
 import { prisma } from '../db/prisma.js';
 import { NOTIFICATION_TIERS, COOLDOWN_DAYS } from '../lib/constants.js';
 
-export const notificationQueue = new Queue('notifications', { connection: redis });
+// BullMQ needs Redis EVAL/EVALSHA. Some Redis users (restricted Upstash ACLs) lack it, so we probe at
+// startup and fall back to in-process timers. Fallback timers are lost on restart.
+let notificationQueue: Queue<NotificationJobData> | null = null;
+const memoryTimers = new Map<string, NodeJS.Timeout>();
 
 const expo = new Expo();
 
@@ -98,47 +101,83 @@ export async function dispatchNotificationTier(requestId: number, radiusKm: numb
   });
 }
 
-export function startNotificationWorker() {
+async function redisSupportsEval(): Promise<boolean> {
+  try {
+    await redis.eval('return 1', 0);
+    return true;
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('NOPERM')) return false;
+    throw err;
+  }
+}
+
+export async function startNotificationWorker() {
+  if (!(await redisSupportsEval())) {
+    console.warn('[notifications] Redis user lacks EVAL permission; using in-memory tier scheduling (timers are lost on restart).');
+    return null;
+  }
+  notificationQueue = new Queue<NotificationJobData>('notifications', { connection: redis, skipVersionCheck: true });
   notificationWorker = new Worker<NotificationJobData>(
     'notifications',
     async (job: Job<NotificationJobData>) => {
       const { requestId, tier, radiusKm } = job.data;
       await dispatchNotificationTier(requestId, radiusKm, tier);
     },
-    { connection: redis },
+    { connection: redis, skipVersionCheck: true },
   );
   return notificationWorker;
 }
 
 export async function stopNotificationWorker() {
+  for (const t of memoryTimers.values()) clearTimeout(t);
+  memoryTimers.clear();
   if (notificationWorker) {
     await notificationWorker.close();
     notificationWorker = null;
   }
-  await notificationQueue.close();
+  if (notificationQueue) {
+    await notificationQueue.close();
+    notificationQueue = null;
+  }
 }
+
+const tierJobId = (requestId: number, tier: number) => `request-${requestId}-tier-${tier}`;
 
 // Schedule all 4 tiers for a new request
 export async function scheduleNotificationTiers(requestId: number) {
   for (let i = 0; i < NOTIFICATION_TIERS.length; i++) {
     const { radiusKm, delayMinutes } = NOTIFICATION_TIERS[i];
-    await notificationQueue.add(
-      'dispatch',
-      { requestId, tier: i + 1, radiusKm },
-      {
-        delay: delayMinutes * 60 * 1000,
-        jobId: `request-${requestId}-tier-${i + 1}`,
-      },
-    );
+    const tier = i + 1;
+    const delay = delayMinutes * 60 * 1000;
+    const id = tierJobId(requestId, tier);
+    if (notificationQueue) {
+      await notificationQueue.add('dispatch', { requestId, tier, radiusKm }, { delay, jobId: id });
+    } else {
+      memoryTimers.set(
+        id,
+        setTimeout(() => {
+          memoryTimers.delete(id);
+          dispatchNotificationTier(requestId, radiusKm, tier).catch((err) =>
+            console.error('[notifications] tier dispatch failed', err),
+          );
+        }, delay),
+      );
+    }
   }
 }
 
 // Cancel all pending tier jobs when a request is matched
 export async function cancelNotificationTiers(requestId: number) {
   for (let i = 1; i <= NOTIFICATION_TIERS.length; i++) {
-    const job = await notificationQueue.getJob(`request-${requestId}-tier-${i}`);
-    if (job) {
-      await job.remove();
+    const id = tierJobId(requestId, i);
+    const timer = memoryTimers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      memoryTimers.delete(id);
+    }
+    if (notificationQueue) {
+      const job = await notificationQueue.getJob(id);
+      if (job) await job.remove();
     }
   }
 }
