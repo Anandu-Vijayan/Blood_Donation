@@ -5,7 +5,8 @@ import { Redis, type RedisOptions } from 'ioredis';
  * Upstash Dashboard → your database → Connect → tab "ioredis" → copy the URL.
  */
 export function resolveRedisUrl(): string {
-  const direct = process.env.REDIS_URL?.trim();
+  // Dashboards often keep surrounding quotes when a value is pasted from a .env line; ioredis rejects them.
+  const direct = process.env.REDIS_URL?.trim().replace(/^["']+|["']+$/g, '').trim();
   if (direct) return direct;
 
   const host = process.env.UPSTASH_REDIS_HOST?.trim();
