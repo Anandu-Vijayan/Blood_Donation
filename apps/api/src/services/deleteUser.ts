@@ -4,7 +4,10 @@ import { cancelNotificationTiers } from '../workers/notification.worker.js';
 
 export async function deleteUserAccount(firebaseUid: string): Promise<boolean> {
   const user = await prisma.users.findUnique({ where: { firebase_uid: firebaseUid }, select: { id: true } });
-  if (!user) return false;
+  if (!user) {
+    // DB rows may already be gone from an earlier attempt whose Firebase delete failed; finish that now.
+    return deleteFirebaseUser(firebaseUid);
+  }
 
   const donor = await prisma.donors.findUnique({ where: { firebase_uid: firebaseUid }, select: { id: true } });
   const donorId = donor?.id;
@@ -81,19 +84,22 @@ export async function deleteUserAccount(firebaseUid: string): Promise<boolean> {
     await tx.users.deleteMany({ where: { firebase_uid: firebaseUid } });
   });
 
+  await deleteFirebaseUser(firebaseUid);
+  return true;
+}
+
+// Returns true if a Firebase Auth account was deleted, false if none existed. Any other failure
+// throws (502) so the client sees the account was not fully removed and can retry.
+async function deleteFirebaseUser(firebaseUid: string): Promise<boolean> {
+  // Mock users (dev auth bypass) have no Firebase account.
+  if (process.env.NODE_ENV === 'development' && firebaseUid.startsWith('mock-')) return false;
   try {
     await auth.deleteUser(firebaseUid);
+    return true;
   } catch (err: unknown) {
     const errorObj = err as { code?: string; message?: string };
-    if (errorObj?.code === 'auth/user-not-found') {
-      // User is already deleted from Firebase Auth
-    } else {
-      console.error(
-        `[deleteUserAccount] Warning: Failed to delete user ${firebaseUid} from Firebase Auth:`,
-        errorObj?.message || err,
-      );
-    }
+    if (errorObj?.code === 'auth/user-not-found') return false;
+    console.error(`[deleteUserAccount] Failed to delete ${firebaseUid} from Firebase Auth:`, errorObj?.message || err);
+    throw Object.assign(new Error('Account data deleted but Firebase Auth deletion failed; retry'), { statusCode: 502 });
   }
-
-  return true;
 }

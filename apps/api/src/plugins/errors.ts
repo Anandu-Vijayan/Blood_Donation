@@ -16,7 +16,7 @@ export function registerErrorHandler(app: FastifyInstance) {
     request.log.error(error);
 
     return reply.code(statusCode).send({
-      message: error.message || 'Internal Server Error',
+      message: isProd && statusCode >= 500 ? 'Internal Server Error' : error.message || 'Internal Server Error',
       ...(isProd ? {} : { stack: error.stack }),
     });
   });
